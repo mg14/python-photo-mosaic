@@ -7,6 +7,7 @@ import numpy as np
 from PIL import Image
 from skimage import img_as_float
 from skimage.measure import compare_mse
+from tqdm import tqdm
 
 def shuffle_first_items(lst, i):
     if not i:
@@ -77,11 +78,13 @@ def aspect_crop_to_extent(img, target_aspect, centerpoint=None):
     return img.crop(resize)
 
 class Config:
-    def __init__(self, tile_ratio=1920/800, tile_width=50, enlargement=8, color_mode='RGB'):
+    def __init__(self, tile_ratio=1920/800, tile_width=50, match_width = 20, enlargement=8, color_mode='RGB', rotate=False):
         self.tile_ratio = tile_ratio # 2.4
+        self.match_width = match_width
         self.tile_width = tile_width # height/width of mosaic tiles in pixels
         self.enlargement = enlargement # mosaic image will be this many times wider and taller than original
         self.color_mode = color_mode # mosaic image will be this many times wider and taller than original
+        self.rotate = rotate 
 
     @property
     def tile_height(self):
@@ -107,21 +110,30 @@ class TileBox:
         img = aspect_crop_to_extent(img, self.config.tile_ratio)
         large_tile_img = img.resize(self.config.tile_size, Image.ANTIALIAS).convert(self.config.color_mode)
         self.tiles.append(large_tile_img)
+        if self.config.rotate:
+            for i in range(3):
+                self.tiles.append(large_tile_img.rotate(90 * (1+i)))
         return True
 
     def prepare_tiles_from_paths(self, tile_paths):
         print('Reading tiles from provided list...')
-        progress = ProgressCounter(len(tile_paths))
-        for tile_path in tile_paths:
-            progress.update()
-            self.__process_tile(tile_path)          
+        #progress = ProgressCounter(len(tile_paths))
+        for tile_path in tqdm(tile_paths):
+            #progress.update()
+            self.__process_tile(tile_path)
+        print('Rescaling tiles for matching...')
+        
+        match_size = self.config.match_width, int(self.config.match_width / self.config.tile_ratio)
+        print(match_size)
+        self.tile_array = np.array([np.array(t.resize(match_size,Image.NEAREST)) for t in self.tiles]).astype("float32")
         print('Processed tiles.')
         return True
 
     def best_tile_block_match(self, tile_block_original):
-        match_results = [img_mse(t, tile_block_original) for t in self.tiles] 
-        best_fit_tile_index = np.argmin(match_results)
-        return best_fit_tile_index
+        a = np.array(tile_block_original).astype("float32")
+        match_results = ((self.tile_array - a.reshape((1,) + a.shape) )**2).mean((1,2,3)) #[img_mse(t, tile_block_original) for t in self.tiles] 
+        #best_fit_tile_index = np.argmin(match_results)
+        return match_results.argsort() #best_fit_tile_index
 
     def best_tile_from_block(self, tile_block_original, reuse=False):
         if not self.tiles:
@@ -133,7 +145,13 @@ class TileBox:
         #print("BLOCK MATCH took --- %s seconds ---" % (time.time() - start_time))
         match = self.tiles[i].copy()
         if not reuse:
-            del self.tiles[i]
+            if self.config.rotate:
+                indeces = [int(i/4)*4 + j for j in range(3,-1,-1)] # remove all rotated copies
+            else:
+                indeces = [i]
+            for j in indeces:
+                del self.tiles[j]
+            self.tile_array = np.delete(self.tile_array, indeces, axis=0)
         return match
 
 class SourceImage:
@@ -145,8 +163,8 @@ class SourceImage:
 
         with Image.open(self.image_path) as i:
             img = i.copy()
-        w = img.size[0] * self.config.enlargement
-        h = img.size[1]	* self.config.enlargement
+        w = int(img.size[0] * self.config.enlargement)
+        h = int(img.size[1]	* self.config.enlargement)
         large_img = img.resize((w, h), Image.ANTIALIAS)
         w_diff = (w % self.config.tile_width)/2
         h_diff = (h % self.config.tile_height)/2
@@ -209,7 +227,7 @@ def coords_from_middle(x_count, y_count, y_bias=1, shuffle_first=0, ):
     return coords
     
 
-def create_mosaic(source_path, target, tile_ratio=1920/800, tile_width=75, enlargement=8, reuse=True, color_mode='RGB', tile_paths=None, shuffle_first=30):
+def create_mosaic(source_path, target, tile_ratio=1920/800, tile_width=75, match_width=20, enlargement=8, reuse=True, color_mode='RGB', tile_paths=None, shuffle_first=30, rotate=False):
     """Forms an mosiac from an original image using the best
     tiles provided. This reads, processes, and keeps in memory
     a copy of the source image, and all the tiles while processing.
@@ -232,6 +250,8 @@ def create_mosaic(source_path, target, tile_ratio=1920/800, tile_width=75, enlar
         tile_width = tile_width,		# height/width of mosaic tiles in pixels
         enlargement = enlargement,	    # the mosaic image will be this many times wider and taller than the original
         color_mode = color_mode,	    # L for greyscale or RGB for color
+        rotate = rotate,
+        match_width=match_width,
     )
     # Pull in and Process Original Image
     print('Setting Up Target image')
@@ -243,29 +263,58 @@ def create_mosaic(source_path, target, tile_ratio=1920/800, tile_width=75, enlar
     # Assest Tiles, and save if needed, returns directories where the small and large pictures are stored
     print('Assessing Tiles')
     tile_box = TileBox(tile_paths, config)
+    
+    matches = list()
+    boxes = list()
+    print("Matching tiles..\n")
+    
+    for x, y in tqdm(coords_from_middle(mosaic.x_tile_count, mosaic.y_tile_count, y_bias=config.tile_ratio, shuffle_first=shuffle_first)):
+        # Make a box for this sector
+        box_crop = (x * config.tile_width, y * config.tile_height, (x + 1) * config.tile_width, (y + 1) * config.tile_height)
+        
+        # Get Original Image Data for this Sector
+        comparison_block = source_image.image.crop(box_crop).resize([config.match_width, int(config.match_width/config.tile_ratio)])
+        
+        # Get Best Image name that matches the Orig Sector image
+        matches.append(tile_box.best_tile_block_match(comparison_block))
+        boxes.append(box_crop)
+        #tile_match = tile_box.best_tile_from_block(comparison_block, reuse=reuse)
 
+    print("Assembling mosaic..\n")
+    available = set([i for i in range(len(tile_box.tiles))])
+    
     try:
-        progress = ProgressCounter(mosaic.total_tiles)
-        for x, y in coords_from_middle(mosaic.x_tile_count, mosaic.y_tile_count, y_bias=config.tile_ratio, shuffle_first=shuffle_first):
-            progress.update()
-
-            # Make a box for this sector
-            box_crop = (x * config.tile_width, y * config.tile_height, (x + 1) * config.tile_width, (y + 1) * config.tile_height)
-
-            # Get Original Image Data for this Sector
-            comparison_block = source_image.image.crop(box_crop)
-
-            # Get Best Image name that matches the Orig Sector image
-            tile_match = tile_box.best_tile_from_block(comparison_block, reuse=reuse)
+        for i, m in enumerate(tqdm(matches)):
+            
+            if not available:
+                print("Ran out of tiles!\n")
+                mosaic.save()
+                break
+            
+            if not reuse:
+                j = next(j for j in m if j in available)
+                if config.rotate:
+                    indeces = [int(j/4)*4 + k for k in range(3,-1,-1)] # remove all rotated copies
+                else:
+                    indeces = [j]
+                #for k in indeces:
+                #    del available[available.index(k)]
+                available = available - set(indeces)
+            else:
+                j = m[0]
+            tile = tile_box.tiles[j].copy()
             
             # Add Best Match to Mosaic
-            mosaic.add_tile(tile_match, box_crop)
+            mosaic.add_tile(tile, boxes[i])
 
             # Saving Every Sector
-            mosaic.save() 
+            #if i % 100 == 99: 
+            #    mosaic.save() 
 
     except KeyboardInterrupt:
         print('\nStopping, saving partial image...')
 
     finally:
         mosaic.save()
+    
+    mosaic.save()
