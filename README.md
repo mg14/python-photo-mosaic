@@ -9,9 +9,9 @@ pip install scikit-image numpy pillow tqdr
 
 ## Usage
 ```python
-import mosaic
+from mosaic import create_mosaic
 create_mosaic(
-    subject="/path/to/source/image", 
+    source_path="/path/to/source/image", 
     target="/path/to/output/image", 
     tile_paths=["/path/to/tile_1" , ... "/path/to/tile_n"],
     tile_ratio=1920/800, # Crop tiles to be height/width ratio
@@ -20,7 +20,7 @@ create_mosaic(
     reuse=False, # Should tiles be used multiple times?
     color_mode='L',  # RGB (color) L (greyscale)
     rotate=True, # Whether to rotate tiles by multiples of 90; added mg14
-    match_size=30, # Use this resolution for matching; added mg14 
+    match_width=30, # Use this resolution for matching; added mg14 
 ) 
 ```
 
