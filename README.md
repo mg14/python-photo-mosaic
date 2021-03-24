@@ -4,7 +4,7 @@ This utility can be used to generate [photo-mosaic](http://en.wikipedia.org/wiki
 
 ## Prerequisites
 ```python
-pip install scikit-image numpy pillow tqdr
+pip install scikit-image numpy pillow tqdm
 ```
 
 ## Usage
@@ -49,7 +49,7 @@ New features compared to fork include:
 * Reducing the tile size while matching for speed up (around 10x)
 * Optionally rotating tiles for best matches
 * Fractional scaling of target image
-* `tqdr` status bar 
+* `tqdm` status bar 
 
 
 Changed from original project https://github.com/codebox/mosaic:
